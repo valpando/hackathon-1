@@ -102,7 +102,7 @@ def score(df_results, df_truth):
     """
 
     df_comparison = df_truth.merge(
-        df_results, on="ID", suffixes=("_truth", "_result")
+        df_results, on="id", suffixes=("_truth", "_result")
     )
 
     for col in ["01", "02", "03"]:
