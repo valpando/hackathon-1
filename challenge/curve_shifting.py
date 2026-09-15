@@ -15,30 +15,14 @@ warnings.filterwarnings("ignore")
 
 DATA_DIR = Path.cwd().parent / "data"
 TRAINING_DATA_DIR = DATA_DIR / "training"
-# SEED = 86
 
 
-def get_labels(filename="train.csv", split=0.8):
-    
+def get_labels(filename="train.csv"):
+
     df = pd.read_csv(DATA_DIR / filename)
     labels = df["id"].values
 
-    rng = np.random.default_rng(seed=None)#SEED)
-
-    labels = np.asarray(labels)
-    N = len(labels)
-
-    permuted_indices = rng.permutation(N)
-
-    n_train = int(N * split)
-
-    train_indices = permuted_indices[:n_train]
-    val_indices = permuted_indices[n_train:]
-
-    train_labels = labels[train_indices]
-    val_labels = labels[val_indices]
-
-    return train_labels, val_labels
+    return labels
 
 
 #--------------------------------------------------------------------------------------------
@@ -75,12 +59,12 @@ def compute_tau_guess(label):
     data = read_light_curves(TRAINING_DATA_DIR / f"{label}.json")
     for key in data:
         data[key] = data[key].drop_duplicates(subset=["time"])
-    
+
     lc0 = data[0].signal.values
     lc1 = data[1].signal.values
     t0 = data[0].time.values
     t1 = data[1].time.values
-    tau_list = np.arange(-70, 70, 1)
+    tau_list = np.arange(-60, 60, 0.1)
 
     # print("\n", label)
     tau_01, cc_01 = fit_dt_cc(t0, lc0, t1, lc1, tau_list)
@@ -99,10 +83,13 @@ def compute_tau_guess(label):
     else:
         tau_02 = np.nan
         tau_03 = np.nan
+        cc_02 = np.nan
+        cc_03 = np.nan
 
     tau_guess = np.array([tau_01, tau_02, tau_03])
+    cc = np.array([cc_01, cc_02, cc_03])
 
-    return tau_guess
+    return tau_guess, cc
 
 
 #--------------------------------------------------------------------------------------------
@@ -111,7 +98,7 @@ def compute_tau_guess(label):
 
 
 def gen_pycs3_lc(label):
-    
+
     data = read_light_curves(TRAINING_DATA_DIR / f"{label}.json")
     for key in data:
         data[key] = data[key].drop_duplicates(subset=["time"])
@@ -137,22 +124,27 @@ def gen_pycs3_lc(label):
 
 
 def spl(lcs, guess):
-        lcs[1].shifttime(guess[0])
-        pycs3.gen.splml.addtolc(lcs[1], knotstep=300)
-        if len(lcs) > 2:
-            lcs[2].shifttime(guess[1])
-            lcs[3].shifttime(guess[2])
-            pycs3.gen.splml.addtolc(lcs[2], knotstep=300)
-            pycs3.gen.splml.addtolc(lcs[3], knotstep=300)        
-        spline = pycs3.spl.topopt.opt_rough(lcs, nit=5, knotstep=150)
-        spline = pycs3.spl.topopt.opt_fine(lcs, nit=20, knotstep=30)
-        return spline
+    lcs[1].shifttime(-guess[0])
+    pycs3.gen.splml.addtolc(lcs[1], knotstep=300)
+    if len(lcs) > 2:
+        lcs[2].shifttime(-guess[1])
+        lcs[3].shifttime(-guess[2])
+        pycs3.gen.splml.addtolc(lcs[2], knotstep=300)
+        pycs3.gen.splml.addtolc(lcs[3], knotstep=300)
+    spline = pycs3.spl.topopt.opt_rough(lcs, nit=5, knotstep=150)
+    for l in lcs:
+        l.resetml()
+    spline = pycs3.spl.topopt.opt_rough(lcs, nit=5, knotstep=40)
+    spline = pycs3.spl.topopt.opt_fine(lcs, nit=20, knotstep=30)
+    return spline
 
 
-
-def regdiff(lcs):
-        return pycs3.regdiff.multiopt.opt_ts(lcs, pd=1, verbose=False, method="weights")
-
+def regdiff(lcs, guess):
+    lcs[1].shifttime(-guess[0])
+    if len(lcs) > 2:
+        lcs[2].shifttime(-guess[1])
+        lcs[3].shifttime(-guess[2])
+    return pycs3.regdiff.multiopt.opt_ts(lcs, pd=2, verbose=False, method="weights")
 
 
 
@@ -186,37 +178,39 @@ def get_true_delays(df_lookup, label):
 #--------------------------------------------------------------------------------------------
 
 
-def plot_predictions(dts_true, dts_spline):
+def plot_predictions(dts_true, dts_spline, score):
 
-    x = np.linspace(np.min(np.nan_to_num(dts_true)), np.max(np.nan_to_num(dts_true)))
-    plt.scatter(dts_spline, dts_true, label="Spline")
+    x = np.linspace(-45, 55)
+    plt.scatter(dts_spline, dts_true, alpha=0.5)#, label="Spline")
     # plt.scatter(dts_regdiff, dts_true, label="Regdiff")
     # plt.scatter((dts_regdiff+dts_spline)/2, dts_true, label="Averaged")
     plt.plot(x, x, label="1:1", ls="--", color="red")
+    plt.title(f"Test predictions for train set, score: {score:.1f}")
     plt.xlabel(r"$\Delta t_{pred}$ (days)")
     plt.ylabel(r"$\Delta t_{true}$ (days)")
     plt.legend()
-    plt.show()
+    # plt.show()
+    plt.savefig("./test_predictions_plot.png")
 
 
 
 
 def process_label(label, df_lookup):
     lcs = gen_pycs3_lc(label)
-    
-    guess = compute_tau_guess(label)
+
+    guess, _ = compute_tau_guess(label)
 
     lcs_spl = [l.copy() for l in lcs]
     spl(lcs_spl, guess)
     dt_spline = predict_delays(lcs_spl)
 
-    # lcs_regdiff = [l.copy() for l in lcs]
-    # regdiff(lcs_regdiff)
-    # dt_regdiff = predict_delays(lcs_regdiff)
+    lcs_regdiff = [l.copy() for l in lcs]
+    regdiff(lcs_regdiff, guess)
+    dt_regdiff = predict_delays(lcs_regdiff)
 
+    dt_cc = guess
 
-    return get_true_delays(df_lookup, label), dt_spline#, dt_regdiff
-
+    return get_true_delays(df_lookup, label), dt_cc, dt_spline, dt_regdiff
 
 
 #--------------------------------------------------------------------------------------------
@@ -230,39 +224,47 @@ def main():
     # Start the timer
     start_time = time.perf_counter()
 
-    idx_stop = 20
+    labels = get_labels(filename="train.csv")
+    df_lookup = build_delay_lookup(filename="train.csv")
 
-    train_labels, val_labels = get_labels(filename="train.csv", split=1)
-    df_lookup = build_delay_lookup()
+    # SEED = 26
+    # rng = np.random.default_rng(seed=SEED)
+    # labels = np.asarray(labels)
+    # N = len(labels)
+    # permuted_indices = rng.permutation(N) 
+    # labels = labels[permuted_indices]
+    # labels = labels[:100]
 
     results = []
-    with ProcessPoolExecutor(max_workers=8) as executor:
-        futures = {executor.submit(process_label, l, df_lookup): l for l in train_labels[:idx_stop]}
+    with ProcessPoolExecutor(max_workers=16) as executor:
+        futures = {executor.submit(process_label, l, df_lookup): l for l in labels}
         for i, fut in enumerate(as_completed(futures)):
             print(f"Processed {futures[fut]} ({i+1}/{len(futures)})")
             results.append(fut.result())
 
-    dts_true, dts_spline = map(np.array, zip(*results))
+    dts_true, dts_cc, dts_spline, dts_regdiff = map(np.array, zip(*results))
 
-    df_true = pd.DataFrame(np.column_stack((train_labels[:idx_stop], dts_true)), columns=["id", "01", "02", "03"])
+    df_true = pd.DataFrame(np.column_stack((labels, dts_true)), columns=["id", "01", "02", "03"])
 
-    df_pred = pd.DataFrame(np.column_stack((train_labels[:idx_stop], dts_spline)), columns=["id", "01", "02", "03"])
-
-    
-    pred_spline = score(df_results=df_pred, df_truth=df_true)
-
-    print(f"\nPrediction using spline method before removing values outside threshold: {pred_spline:.1f}\n")
+    df_cc = pd.DataFrame(np.column_stack((labels, dts_cc)), columns=["id", "01", "02", "03"])
+    df_spline = pd.DataFrame(np.column_stack((labels, dts_spline)), columns=["id", "01", "02", "03"])
+    df_regdiff = pd.DataFrame(np.column_stack((labels, dts_regdiff)), columns=["id", "01", "02", "03"])
 
     cols = ["01", "02", "03"]
-    df_pred[cols] = df_pred[cols].mask((df_pred[cols] < -60) | (df_pred[cols] > 60))
+    df_cc[cols] = df_cc[cols].where(df_cc[cols].abs() <= 60, np.nan)
+    df_spline[cols] = df_spline[cols].where(df_spline[cols].abs() <= 60, np.nan)
+    df_regdiff[cols] = df_regdiff[cols].where(df_regdiff[cols].abs() <= 60, np.nan)
 
-    pred_spline = score(df_results=df_pred, df_truth=df_true)
-    # pred_regdiff = evaluate_prediction(dts_true, dts_regdiff)
-    # pred_avg = evaluate_prediction(dts_true, (dts_regdiff+dts_spline)/2)
+    df_cc.to_csv("./train_cc.csv", index=False)
+    df_spline.to_csv("./train_spline.csv", index=False)
+    df_regdiff.to_csv("./train_regdiff.csv", index=False)
 
-    print(f"\nPrediction using spline method after removing values outside threshold: {pred_spline:.1f}\n")
-    # print(f"Prediction using regression-difference method: {pred_regdiff:.1f}\n")
-    # print(f"Prediction averaging methods: {pred_avg:.1f}\n")
+    score_cc = score(df_results=df_cc, df_truth=df_true)
+    score_spline = score(df_results=df_spline, df_truth=df_true)
+    score_regdiff = score(df_results=df_regdiff, df_truth=df_true)
+    print(f"Score cc: {score_cc:.1f}")
+    print(f"Score spline: {score_spline:.1f}")
+    print(f"Score regdiff: {score_regdiff:.1f}")
 
     # End the timer
     end_time = time.perf_counter()
@@ -270,10 +272,10 @@ def main():
     execution_time = end_time - start_time
     print(f"Execution time: {int(execution_time):d} seconds")
 
-    true_array = df_true[["01", "02", "03"]].to_numpy().flatten()
-    pred_array = df_true[["01", "02", "03"]].to_numpy().flatten()
+    # true_array = df_true[["01", "02", "03"]].to_numpy().flatten()
+    # pred_array = df_pred[["01", "02", "03"]].to_numpy().flatten()
 
-    plot_predictions(true_array, pred_array)
+    # plot_predictions(true_array, pred_array, pred_spline)
 
 
 if __name__ == "__main__":
